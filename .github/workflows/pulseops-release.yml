@@ -1,0 +1,94 @@
+﻿name: PulseOps Blue-Green Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Environment to route traffic to"
+        required: true
+        type: choice
+        options:
+          - green
+          - blue
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AZURE_RESOURCE_GROUP: rg-bluegreen-lab
+  AZURE_LB_NAME: lb-blue-green
+  AZURE_LB_RULE: active-http-rule
+  PUBLIC_HOST: deploy-bg-lab.southindia.cloudapp.azure.com
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Azure login using OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Validate candidate VM before switching
+        shell: bash
+        run: |
+          if [ "${{ inputs.target }}" = "green" ]; then VM="vm-green"; EXPECTED="green"; else VM="vm-blue"; EXPECTED="blue"; fi
+          echo "Checking candidate $VM through Azure VM Run Command..."
+          RESULT=$(az vm run-command invoke \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --name "$VM" \
+            --command-id RunShellScript \
+            --scripts "set -e; curl --fail --silent --show-error http://127.0.0.1/health; curl --fail --silent --show-error http://127.0.0.1/api/status" \
+            --query "value[0].message" -o tsv)
+          echo "$RESULT"
+          echo "$RESULT" | grep -q '"status":"healthy"'
+          echo "$RESULT" | grep -q "\"color\":\"$EXPECTED\""
+          echo "Candidate VM is healthy."
+
+      - name: Switch Load Balancer traffic
+        id: switch
+        shell: bash
+        run: |
+          if [ "${{ inputs.target }}" = "green" ]; then POOL="pool-green"; else POOL="pool-blue"; fi
+          az network lb rule update \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --lb-name "$AZURE_LB_NAME" \
+            --name "$AZURE_LB_RULE" \
+            --backend-pool-name "$POOL" \
+            --output none
+          echo "switched=true" >> "$GITHUB_OUTPUT"
+          echo "Traffic switched to $POOL."
+
+      - name: Verify public endpoint after switch
+        shell: bash
+        run: |
+          TARGET="${{ inputs.target }}"
+          SUCCESS=0
+          for i in $(seq 1 18); do
+            BODY=$(curl --fail --silent --show-error --max-time 8 "http://${PUBLIC_HOST}/api/status" 2>/dev/null || true)
+            echo "Attempt $i: $BODY"
+            if [[ "$BODY" == *"\"color\":\"$TARGET\""* ]]; then SUCCESS=1; break; fi
+            sleep 5
+          done
+          if [ "$SUCCESS" -ne 1 ]; then
+            echo "Public endpoint did not report expected environment: $TARGET"
+            exit 1
+          fi
+          echo "Public endpoint confirms $TARGET is serving traffic."
+
+      - name: Roll back to previous environment if post-switch verification fails
+        if: ${{ failure() && steps.switch.outputs.switched == 'true' }}
+        shell: bash
+        run: |
+          if [ "${{ inputs.target }}" = "green" ]; then PREVIOUS="pool-blue"; else PREVIOUS="pool-green"; fi
+          echo "Release verification failed; restoring traffic to $PREVIOUS."
+          az network lb rule update \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --lb-name "$AZURE_LB_NAME" \
+            --name "$AZURE_LB_RULE" \
+            --backend-pool-name "$PREVIOUS" \
+            --output none
+          echo "Rollback command completed."

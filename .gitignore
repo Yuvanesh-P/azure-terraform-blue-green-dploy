@@ -1,0 +1,41 @@
+# Terraform working files
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfplan
+*.plan
+
+# Local variables and secrets
+terraform/terraform.tfvars
+*.auto.tfvars
+*.auto.tfvars.json
+.env
+.env.*
+
+# Credentials and SSH keys
+*.pem
+*.key
+id_rsa
+id_rsa.pub
+
+# Editor / OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Bootstrap local variables
+bootstrap/terraform.tfvars
+# Local Python environment
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Local backups and archives
+backup-*/
+*.zip
+
+.venv/
